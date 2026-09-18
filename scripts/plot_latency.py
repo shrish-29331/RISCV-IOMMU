@@ -37,8 +37,10 @@ def plot_latencies(csv_file):
     plt.close()
 
     # 3. Hit vs Miss Latency
-    hit_lats = df[(df['iotlb_hit'] == 'YES') | (df['iotlb_miss'] == 'NO')]['latency_cycles'].dropna()
-    miss_lats = df[df['iotlb_miss'] == 'YES']['latency_cycles'].dropna()
+    is_hit = (df['iotlb_hit'] == True) | (df['iotlb_hit'].astype(str).str.upper() == 'YES') | (df['iotlb_miss'] == False) | (df['iotlb_miss'].astype(str).str.upper() == 'NO')
+    is_miss = (df['iotlb_miss'] == True) | (df['iotlb_miss'].astype(str).str.upper() == 'YES')
+    hit_lats = df[is_hit]['latency_cycles'].dropna()
+    miss_lats = df[is_miss]['latency_cycles'].dropna()
     
     plt.figure(figsize=(10, 6))
     plt.boxplot([hit_lats, miss_lats])

@@ -1,0 +1,34 @@
+# Experiment 4: IOTLB Capacity Probing via Timing Side-Channels
+
+## Objective
+To demonstrate a micro-architectural timing side-channel vulnerability within the RISC-V IOMMU's Translation Lookaside Buffer (IOTLB). By precisely measuring translation latencies, a malicious bus master or compromised VM can reverse-engineer the exact capacity of the fully-associative IOTLB.
+
+## Threat Model
+- **Attacker Capability**: The attacker controls a DMA-capable device (e.g., a programmable NIC or GPU) assigned to a specific Device Context. The attacker can issue arbitrary memory translation requests via the AXI Translation Request Interface and measure cycle latencies (time between `ARVALID` and `RVALID`).
+- **Attacker Limitations**: The attacker does not have physical access, nor can they read RTL source code or privileged IOMMU configuration registers. 
+- **Goal**: To discover the hidden hardware parameter `IOTLB_ENTRIES` (in our case, `N=16`).
+
+## Probing Algorithm & Methodology
+We developed a "Sweep and Measure" algorithm in the C++ testbench (`tb_iommu.cpp`):
+1. **Sweep**: The working set size $W$ is incrementally swept from 1 to 32.
+2. **Warm-up**: For a given $W$, the attacker issues $W$ consecutive translation requests to $W$ unique, contiguous 4KB IOVAs. This forces the IOMMU to fetch and install $W$ page table entries into the IOTLB.
+3. **Measurement**: The attacker re-requests the *first* IOVA accessed in the warm-up phase and times the cycle latency of the completion response.
+   - If the IOTLB capacity $N \ge W$, the first IOVA remains cached, resulting in a fast hit (~2 cycles).
+   - If the capacity $N < W$, the warm-up phase will have evicted the first IOVA to make room for the $W$-th IOVA, resulting in a cache miss and a full Page Table Walk (~30+ cycles).
+
+## Empirical Results
+As demonstrated in the `iotlb_probe.csv` trace and `iotlb_probe.png` visualization:
+- For working sets $W = 1$ through $W = 16$, the measurement latency remains consistently low (2 cycles), marked as an `IOTLB Hit`.
+- At exactly $W = 17$, the measurement latency spikes dramatically, crossing the threshold and marking an `IOTLB Miss`.
+- The exact "latency cliff" exposes the hardware cache capacity: $N = W - 1 = 16$.
+
+## Security Implications & Exploit Scenarios
+Discovering the exact capacity of the IOTLB is the foundational step for advanced micro-architectural attacks:
+
+1. **Targeted Cache Eviction**: Once $N$ is known, an attacker can reliably evict *all* victim entries from the shared IOTLB by simply issuing $N$ requests to attacker-controlled IOVAs. 
+2. **Evict+Reload Covert Channels**: Two isolated VMs assigned to different devices can communicate covertly across the IOMMU boundary. Sender VM evicts the shared cache; Receiver VM measures if its own translations hit or miss, receiving binary data via the timing delta.
+3. **Denial of Service (Performance Degradation)**: By continuously maintaining a working set of exactly $N+1$ active pages, a noisy-neighbor device can intentionally thrash the IOTLB, monopolizing the AXI memory interconnect with Page Table Walks and degrading the I/O throughput of all other devices on the SoC.
+
+## Mitigation Strategies
+- **Cache Partitioning**: Implement hardware QoS that partitions the IOTLB per-device or per-domain to prevent cross-device eviction interference.
+- **Randomized Replacement Policies**: Moving away from strict LRU/FIFO to pseudo-random replacement makes it mathematically difficult for an attacker to guarantee a specific entry is evicted, muddying the timing channel.

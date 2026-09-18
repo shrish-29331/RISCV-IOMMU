@@ -28,14 +28,17 @@ def generate_stats(json_file):
     # Filter out requests with no latency (e.g. unfinished)
     valid_reqs = [r for r in reqs if r.get('latency_cycles') is not None]
 
+    is_true = lambda val: val is True or str(val).upper() in ('YES', 'TRUE', '1')
+    is_false = lambda val: val is False or str(val).upper() in ('NO', 'FALSE', '0')
+
     all_lats = [r['latency_cycles'] for r in valid_reqs]
-    hit_lats = [r['latency_cycles'] for r in valid_reqs if r['iotlb_hit'] == 'YES' or r['iotlb_miss'] == 'NO']
-    miss_lats = [r['latency_cycles'] for r in valid_reqs if r['iotlb_miss'] == 'YES']
-    ddt_lats = [r['latency_cycles'] for r in valid_reqs if r['ddt_walk'] == 'YES']
-    ptw_s1_lats = [r['latency_cycles'] for r in valid_reqs if r['s1_ptw'] == 'YES']
-    ptw_s2_lats = [r['latency_cycles'] for r in valid_reqs if r['s2_ptw'] == 'YES']
-    succ_lats = [r['latency_cycles'] for r in valid_reqs if r['success'] == 'YES']
-    fail_lats = [r['latency_cycles'] for r in valid_reqs if r['success'] == 'NO']
+    hit_lats = [r['latency_cycles'] for r in valid_reqs if is_true(r.get('iotlb_hit')) or is_false(r.get('iotlb_miss'))]
+    miss_lats = [r['latency_cycles'] for r in valid_reqs if is_true(r.get('iotlb_miss'))]
+    ddt_lats = [r['latency_cycles'] for r in valid_reqs if is_true(r.get('ddt_walk'))]
+    ptw_s1_lats = [r['latency_cycles'] for r in valid_reqs if is_true(r.get('s1_ptw'))]
+    ptw_s2_lats = [r['latency_cycles'] for r in valid_reqs if is_true(r.get('s2_ptw'))]
+    succ_lats = [r['latency_cycles'] for r in valid_reqs if is_true(r.get('success'))]
+    fail_lats = [r['latency_cycles'] for r in valid_reqs if is_false(r.get('success'))]
 
     print("TempoIOMMU-RV Latency Statistics")
     print()

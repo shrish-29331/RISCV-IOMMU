@@ -40,11 +40,13 @@
 // Bit 221: aw_valid
 // Bits 370:222: aw (aw_chan_iommu_t, 149 bits)
 
-static void clear_dev_tr_req(IData* req) {
+template <typename T>
+static void clear_dev_tr_req(T& req) {
     for (int i = 0; i < 12; i++) req[i] = 0;
 }
 
-static void set_dev_tr_req_ar(IData* req, uint32_t dev_id, uint32_t proc_id, bool proc_valid, 
+template <typename T>
+static void set_dev_tr_req_ar(T& req, uint32_t dev_id, uint32_t proc_id, bool proc_valid, 
                              uint64_t iova, uint8_t ttype, uint8_t id = 1) {
     clear_dev_tr_req(req);
 
@@ -96,11 +98,13 @@ static void set_dev_tr_req_ar(IData* req, uint32_t dev_id, uint32_t proc_id, boo
 // Bits 328:204: aw (aw_chan_slv_t, 125 bits)
 //   Bits 298:235: addr (64)
 
-static void clear_prog_req(IData* req) {
+template <typename T>
+static void clear_prog_req(T& req) {
     for (int i = 0; i < 9; i++) req[i] = 0;
 }
 
-static void set_prog_req_write(IData* req, uint64_t addr, uint64_t data, uint8_t strb = 0xFF) {
+template <typename T>
+static void set_prog_req_write(T& req, uint64_t addr, uint64_t data, uint8_t strb = 0xFF) {
     clear_prog_req(req);
     auto set_bits = [&](uint32_t start_bit, uint32_t num_bits, uint64_t value) {
         for (uint32_t i = 0; i < num_bits; i++) {
@@ -354,12 +358,11 @@ int main(int argc, char** argv) {
                           << " w_ready=" << w_rdy << " b_valid=" << b_vld << std::endl;
             }
 
-            // Execute Experiment Sequence
-            // Issue 30 requests looping through 5 devices on the same IOVA
-            if (!req_active && req_clear_pending == false && cycle > 50 && cycle % 100 == 0 && exp_stage < 30) {
-                int devices[] = {10, 20, 30, 40, 50};
-                int dev = devices[exp_stage % 5];
-                uint64_t iova = 0x4000ULL;
+            // Execute Experiment 1: IOTLB Capacity Thrashing
+            // Issue 34 requests looping through a working set of 17 pages on a single device
+            if (!req_active && req_clear_pending == false && cycle > 50 && cycle % 100 == 0 && exp_stage < 34) {
+                int dev = 10;
+                uint64_t iova = 0x4000ULL + ((exp_stage % 17) * 0x1000ULL);
                 std::cout << "[Cycle " << cycle << "] [REQ " << exp_stage << "] Driver issuing DMA Request: Dev=" << dev << ", IOVA=0x" << std::hex << iova << std::dec << std::endl;
                 set_dev_tr_req_ar(top->dev_tr_req_i, dev, 0, false, iova, 2, exp_stage + 1);
                 req_active = true;

@@ -63,3 +63,37 @@ stats:
 
 plot:
 	python3 scripts/plot_latency.py results/translation_trace.csv
+
+# ============================================================
+# Experiment-specific targets
+# ============================================================
+
+# Experiment 1: IOTLB Capacity Thrashing
+build1:
+	$(VERILATOR) --cc --trace --exe tb1_iommu.cpp lint_checks.sv ${INC} ${WARN_FLAGS} -Wno-WIDTH -Wno-UNOPTFLAT --build -o Vlint_checks
+
+sim1: build1
+	./obj_dir/Vlint_checks
+
+exp1: sim1 parse stats plot
+	@echo "Experiment 1 (IOTLB Capacity Thrashing) complete."
+
+# Experiment 2: Multi-Device Context Contention
+build2:
+	$(VERILATOR) --cc --trace --exe tb2_iommu.cpp lint_checks.sv ${INC} ${WARN_FLAGS} -Wno-WIDTH -Wno-UNOPTFLAT --build -o Vlint_checks
+
+sim2: build2
+	./obj_dir/Vlint_checks
+
+exp2: sim2 parse stats plot
+	@echo "Experiment 2 (Multi-Device Context Contention) complete."
+
+# Experiment 3: Interconnect Memory Contention
+build3:
+	$(VERILATOR) --cc --trace --exe tb3_iommu.cpp lint_checks.sv ${INC} ${WARN_FLAGS} -Wno-WIDTH -Wno-UNOPTFLAT --build -o Vlint_checks
+
+sim3: build3
+	./obj_dir/Vlint_checks
+
+exp3: sim3 parse stats plot
+	@echo "Experiment 3 (Interconnect Memory Contention) complete."
