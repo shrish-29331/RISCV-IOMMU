@@ -101,12 +101,13 @@ def parse_vcd_trace(vcd_path, json_out="results/translation_trace.json", csv_out
     comp_events = []
     tr_resp_vcd = get_signal("dev_tr_resp_o")
     if tr_resp_vcd:
+        prev_r_valid = 0
         for t, val in tr_resp_vcd.tv:
             val_int = parse_bin(val)
             r_valid = (val_int >> 72) & 1
-            if r_valid:
-                r_resp = (val_int >> 2) & 3
-                r_data = (val_int >> 4) & 0xFFFFFFFFFFFFFFFF
+            if r_valid and not prev_r_valid:
+                r_resp = (val_int >> 6) & 3
+                r_data = (val_int >> 8) & 0xFFFFFFFFFFFFFFFF
                 success = (r_resp == 0)
                 comp_events.append({
                     "time": t,
@@ -115,6 +116,7 @@ def parse_vcd_trace(vcd_path, json_out="results/translation_trace.json", csv_out
                     "physical_address": f"0x{r_data:016x}",
                     "resp_code": r_resp
                 })
+            prev_r_valid = r_valid
 
     comp_events.sort(key=lambda x: x["time"])
 
@@ -220,7 +222,11 @@ def parse_vcd_trace(vcd_path, json_out="results/translation_trace.json", csv_out
     print("TempoIOMMU-RV Translation Analysis Report")
     print("=" * 60)
 
-    for rec in results:
+    for i, rec in enumerate(results):
+        if len(results) > 100 and i >= 10:
+            if i == 10:
+                print(f"\n... skipping detailed print for remaining {len(results)-10} requests ...")
+            continue
         print(f"\nRequest #{rec['request_id']}")
         print("-" * 60)
         print(f"Device ID             : {rec['device_id']}")

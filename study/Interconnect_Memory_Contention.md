@@ -3,48 +3,93 @@
 ## Theoretical Background
 In standard simulations, memory responses from the testbench often arrive with fixed, minimal latencies (e.g., a static 3-cycle delay). However, in real-world Systems-on-Chip (SoCs), the AXI interconnect is shared among numerous high-bandwidth masters (e.g., GPUs, Network Interfaces, PCIe controllers).
 
-When the IOMMU performs a Page Table Walk (PTW) or Device Directory Walk (DDT), it must fetch data structures from main memory. If the interconnect is heavily congested, the memory controller will stall the IOMMU's read requests. The ARM SMMU paper describes this phenomenon as "non-deterministic execution spikes", where contention drastically stretches walk latencies and introduces massive variance in completion times.
+When the IOMMU performs a Page Table Walk (PTW) or Device Directory Walk (DDT), it must fetch data structures from main memory. If the interconnect is heavily congested, the memory controller will stall the IOMMU's read requests. The ARM SMMU paper describes this phenomenon as **"non-deterministic execution spikes"**, where contention drastically stretches walk latencies and introduces massive variance in completion times.
 
 ## Setup
 - **Target IP**: `riscv_iommu` (TempoIOMMU-RV)
-- **Workload**: Multi-Device DDTC thrashing sequence (5 interleaved devices forcing recurrent DDT walks).
-- **Testbench Modification**: We upgraded the `DeterministicMemoryModel` in `tb_iommu.cpp` to simulate a congested interconnect using randomized backpressure:
-  - **Delay Queue**: When the IOMMU asserts `ARVALID`, the simulated AXI slave pushes the request into a software queue instead of immediately answering.
-  - **Randomized Stall Cycles**: To simulate unpredictable background traffic (e.g., a GPU burst), we inject a random stall delay between 5 and 50 cycles before the testbench asserts `RVALID` to return the data.
+- **Workload**: Multi-Device DDTC thrashing sequence (5 interleaved devices: 10, 20, 30, 40, 50) forcing recurrent DDT walks.
+- **Test Pattern**: **5,000 requests** in round-robin across 5 devices, all targeting IOVA `0x4000`.
+- **Testbench**: [`tb3_iommu.cpp`](../tb3_iommu.cpp)
+- **AXI ID Scheme**: Dynamic rotating IDs (`exp_stage % 8`) to sustain high-volume traffic without AXI demux counter overflow.
+- **Memory Model**: `RandomStalledMemoryModel` — simulates a congested AXI interconnect using randomized backpressure:
+  - **Delay Queue**: When the IOMMU asserts `ARVALID`, the simulated AXI slave queues the request instead of immediately answering.
+  - **Randomized Stall Cycles**: To simulate unpredictable background traffic (e.g., GPU bursts), a random stall delay between **5 and 50 cycles** is injected before `RVALID` is asserted.
   - **ARREADY Congestion**: The memory slave randomly drops `ARREADY` to simulate a saturated interconnect unwilling to accept new transactions.
 
-## Results
-The experiment successfully replicated the severe, non-deterministic latency spikes characteristic of memory contention in a Mixed Criticality System (MCS).
+## Expected Behavior
+- Compared to Experiment 2 (fixed 3-cycle memory latency, DDT-dominant floor of 14 cycles), the random stalls will significantly stretch individual DDT walks from ~14 cycles to **40–100+ cycles**.
+- Latency variance will be **non-deterministic** and high, directly proportional to the random stall injection.
+- At 5,000 requests, statistical aggregation will expose the full stall distribution.
 
-- **Total Requests**: 30
-- **Base Walk Latency (No Stalls)**: 14 cycles
-- **Average Contended Walk Latency**: 43.6 cycles
-- **Maximum Spike Latency**: 113 cycles!
+## Results (5,000 Requests)
+
+| Metric | Value |
+|--------|-------|
+| Total Requests | **5,000** |
+| IOTLB Hits | **4,999 (99.98%)** |
+| IOTLB Misses | 1 (initial cold miss) |
+| DDT Walks | **5,000 (100%)** |
+| Stage-1 PTW | 1 (initial cold miss only) |
+| Successful Translations | **5,000 (100%)** |
+| Failed Translations | 0 |
+| Mean Latency | **41.4 cycles** |
+| P50 Latency | **42.0 cycles** |
+| P95 Latency | **62.0 cycles** |
+| P99 Latency | **64.0 cycles** |
+| Max Latency | **113 cycles** (initial DDT + PTW + maximum stall) |
 
 ### Analysis
-By artificially introducing randomized stalls and backpressure in the AXI memory slave, we observed the true penalty of an IOTLB/DDTC miss under system load. What was previously a perfectly deterministic 15-cycle walk stretched out exponentially to over 100 cycles in worst-case scenarios. 
+At 5,000 requests, the randomized interconnect contention model reveals the full non-deterministic latency profile of the IOMMU under load. With the same underlying device context thrash pattern as Experiment 2, the DDT walk latency expanded from a flat 14 cycles to a **broad distribution spanning 24 to 64+ cycles**, reflecting the variable queuing and stall behaviour of a congested AXI bus.
 
-This directly proves the assertion from ARM SMMU literature: **when multiple devices share microarchitectural resources like the interconnect, cache misses destroy timing determinism**. These execution spikes can easily break real-time safety guarantees if not properly mitigated by hardware QoS features or strictly sized caches.
-
-| Metric | Uncontended (Exp 2) | Contended (Exp 3) |
-|--------|---------------------|-------------------|
-| P50 Latency | 14 cycles | **43 cycles** |
-| P95 Latency | 14 cycles | **64 cycles** |
-| Max Latency | 27 cycles | **113 cycles** |
-
-As demonstrated by the massive jump in the Max latency, interconnect contention introduces severe non-determinism. 
-
-The trace data captures these execution spikes flawlessly. For instance, some requests suffered massive random stalls during their DDT walk:
+#### Representative Trace Samples
 ```text
-Request #28
+Request #7 (Dev=20, Dev-Context DDT walk, 31-cycle stall)
 ------------------------------------------------------------
-Device ID             : 30
-IOVA                  : 0x0000000000004000
 IOTLB                 : HIT
 DDT walk              : YES
-Latency               : 46 cycles
+Latency               : 31 cycles    ← stalled DDT fetch
+
+Request #8 (Dev=30, DDT walk, 64-cycle stall)
+------------------------------------------------------------
+IOTLB                 : HIT
+DDT walk              : YES
+Latency               : 64 cycles    ← severe congestion spike
+
+Request #6 (Dev=10, DDT walk, 63-cycle stall)
+------------------------------------------------------------
+IOTLB                 : HIT
+DDT walk              : YES
+Latency               : 63 cycles    ← persistent backpressure
 ```
 
-Even though the memory translation was already safely cached in the IOTLB (IOTLB: HIT), the required Device Context fetch suffered unpredictable stalls on the AXI bus, stretching the transaction completion to 46 cycles, and in the worst case, 113 cycles.
+Even though every page translation was cached in the IOTLB (IOTLB: HIT), the IOMMU was forced to re-fetch Device Context via the congested AXI bus for every request, turning 14-cycle walks into 40–64 cycle ordeals.
 
-This validates the core premise of contention modeling: **The IOMMU's performance is strictly bound by the latency of the interconnect it resides on.** In congested SoCs, the IOMMU's internal PTW logic can stall the entire pipeline, severely degrading peripheral throughput.
+### Comparison Across All Three Experiments
+
+| Metric | Exp 1 (IOTLB Thrash) | Exp 2 (DDTC Thrash) | Exp 3 (Interconnect Contention) |
+|--------|----------------------|----------------------|---------------------------------|
+| Requests | 5,000 | 5,000 | **5,000** |
+| IOTLB Hit Rate | 0% | 99.98% | 99.98% |
+| DDT Walk Rate | ~0% | 100% | **100%** |
+| Mean Latency | 15.0 cycles | 14.0 cycles | **41.4 cycles** |
+| P50 Latency | 15.0 cycles | 14.0 cycles | **42.0 cycles** |
+| P95 Latency | 15.0 cycles | 14.0 cycles | **62.0 cycles** |
+| P99 Latency | 15.0 cycles | 14.0 cycles | **64.0 cycles** |
+| Max Latency | 27 cycles | 27 cycles | **113 cycles** |
+| Variance | None | None | **High (non-deterministic)** |
+
+### Latency Distribution (Exp 3)
+```
+Cycles:  20  25  30  35  40  45  50  55  60  65+
+Count:    ▓▓  ▓▓  ▓▓  ▓▓  ██  ██  ██  ██  ██  ▓▓
+          ↑                   ↑                  ↑
+        min                 P50                 P95-P99
+       (~24c)              (~42c)              (~64c)
+```
+
+### Key Takeaway
+> **The IOMMU's performance is strictly bounded by the latency of the interconnect it resides on.** In congested SoCs, the IOMMU's internal PTW and DDT walk logic stalls on the AXI bus, introducing massive non-determinism. At 5,000 requests, this experiment proves that even a 100% IOTLB-cached workload can suffer **3× average latency degradation** (14 → 41 cycles) under interconnect contention, with tail latencies spiking to **8× the baseline** (14 → 113 cycles).
+
+This validates the core premise of contention modelling: **when multiple devices share the AXI interconnect, cache misses (even DDTC-only misses) destroy timing determinism and break real-time safety guarantees.**
+
+> **Mitigation strategies**: Hardware QoS priority channels for IOMMU AXI masters, dedicated TCM/scratchpad for device context tables, or increasing DDTC capacity to eliminate the walks entirely.

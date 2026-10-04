@@ -465,6 +465,8 @@ module rv_iommu_ptw_sv39x4 #(
                                     if (gpaddr_is_msi) begin
                                         gpaddr_is_msi_o = 1'b1;
                                         state_n         = IDLE;
+                                    end else if (!en_2S_i) begin
+                                        state_n         = IDLE;
                                     end
                                 end
 

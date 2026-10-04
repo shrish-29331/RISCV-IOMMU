@@ -5,7 +5,7 @@
 // Setup:
 //   - Single device (device_id = 10)
 //   - Working set: 17 unique 4KB pages (N+1 where N = IOTLB_ENTRIES = 16)
-//   - 34 total requests: 2 full passes over the 17-page working set
+//   - 10000 total requests: multiple passes over the 17-page working set
 //   - NO random stalls injected into memory model (clean bus)
 //
 // Expected:
@@ -114,12 +114,14 @@ public:
             uint64_t beat_addr = active_read.base_addr + (active_read.current_beat * 8);
             uint64_t val = read64(beat_addr);
             bool is_last = (active_read.current_beat == active_read.len);
-            top->ds_resp_i[2] |= (1U << 8);
-            if (is_last) top->ds_resp_i[0] |= (1U << 1);
+            
+            top->ds_resp_i[2] |= (1U << 8); // r_valid
+            if (is_last) top->ds_resp_i[0] |= (1U << 1); // r_last
             top->ds_resp_i[0] |= (uint32_t)((val & 0x0FFFFFFFULL) << 4);
             top->ds_resp_i[1] |= (uint32_t)((val >> 28) & 0xFFFFFFFFULL);
             top->ds_resp_i[2] |= (uint32_t)((val >> 60) & 0xF);
             top->ds_resp_i[2] |= ((active_read.id & 0xF) << 4);
+            
             if (is_last) has_active_read = false; else active_read.current_beat++;
         }
     }
@@ -164,7 +166,7 @@ int main(int argc, char** argv) {
     std::cout << "\n============================================================" << std::endl;
     std::cout << "TempoIOMMU-RV: Experiment 1 - IOTLB Capacity Thrashing" << std::endl;
     std::cout << "  Device: 10 | Working Set: 17 pages | IOTLB_ENTRIES: 16" << std::endl;
-    std::cout << "  Total Requests: 34 (Pass1: req 0-16, Pass2: req 17-33)" << std::endl;
+    std::cout << "  Total Requests: 1000" << std::endl;
     std::cout << "  Expected: 0% hit rate, all requests at ~15 cycle PTW latency" << std::endl;
     std::cout << "============================================================" << std::endl;
 
@@ -173,7 +175,7 @@ int main(int argc, char** argv) {
     uint64_t req_start_cycle = 0;
     int exp_stage = 0;
 
-    for (uint64_t time = 0; time < 40000; time++) {
+    for (uint64_t time = 0; time < 20000000; time++) {
         top->clk_i = (time % 10 < 5) ? 0 : 1;
         top->eval();
         if (time == 100) { top->rst_ni = 1; std::cout << "[Cycle " << cycle << "] Reset de-asserted." << std::endl; }
@@ -192,40 +194,55 @@ int main(int argc, char** argv) {
                           << " w_ready=" << w_rdy << " b_valid=" << b_vld << std::endl;
             }
 
-            // === EXP1: Single device, 17-page working set, 34 requests ===
-            if (!req_active && !req_clear_pending && cycle > 50 && cycle % 100 == 0 && exp_stage < 34) {
+            // === EXP1: Single device, 17-page working set, 5000 requests ===
+            if (!req_active && !req_clear_pending && cycle > 50 && exp_stage < 5000) {
                 int dev = 10;
                 uint64_t iova = 0x4000ULL + ((exp_stage % 17) * 0x1000ULL);
-                int pass = (exp_stage < 17) ? 1 : 2;
+                int pass = (exp_stage / 17) + 1;
+                uint8_t req_id = exp_stage % 8;
                 std::cout << "[Cycle " << cycle << "] [REQ " << exp_stage
                           << " | Pass " << pass << "] Dev=" << dev
                           << ", IOVA=0x" << std::hex << iova << std::dec << std::endl;
-                set_dev_tr_req_ar(top->dev_tr_req_i, dev, 0, false, iova, 2, exp_stage + 1);
+                set_dev_tr_req_ar(top->dev_tr_req_i, dev, 0, false, iova, req_id, 0);
                 req_active = true; req_start_cycle = cycle; exp_stage++;
             }
             if (req_clear_pending) {
                 clear_dev_tr_req(top->dev_tr_req_i);
-                top->dev_tr_req_i[0] |= 1;
                 req_clear_pending = false; req_active = false;
             }
+            
+            // Always accept read responses to prevent AXI demux FIFO from filling up
+            top->dev_tr_req_i[0] |= 1;
             bool ar_ready = (top->dev_tr_resp_o[2] >> 18) & 1;
             if (req_active && ar_ready) { req_clear_pending = true; }
 
             bool comp_ar_valid = (top->dev_comp_req_o[0] >> 1) & 1;
             static bool mem_resp_pending = false;
             static uint64_t latched_phys_addr = 0;
+
+            top->dev_comp_resp_i[0] = 0;
+            top->dev_comp_resp_i[1] = 0;
+            top->dev_comp_resp_i[2] = 0;
+            
+            top->dev_comp_resp_i[2] |= (1U << 18); // ar_ready (bit 82)
+            top->dev_comp_resp_i[2] |= (1U << 19); // aw_ready (bit 83)
+            top->dev_comp_resp_i[2] |= (1U << 17); // w_ready (bit 81)
+
             if (comp_ar_valid && !mem_resp_pending) { mem_resp_pending = true; latched_phys_addr = 0xbeef0000; }
             if (mem_resp_pending) {
-                top->dev_comp_resp_i[2] |= (1U << 8); top->dev_comp_resp_i[2] |= (1U << 6);
-                top->dev_comp_resp_i[0] = (latched_phys_addr << 4);
-                top->dev_comp_resp_i[1] = (latched_phys_addr >> 28);
+                top->dev_comp_resp_i[2] |= (1U << 8); // r_valid (bit 72)
+                top->dev_comp_resp_i[0] |= (1U << 5); // r_last (bit 5)
+                uint8_t req_id = (exp_stage - 1) % 8;
+                top->dev_comp_resp_i[0] |= ((uint32_t)req_id << 1); // r_id (bits 4:1)
+                top->dev_comp_resp_i[0] |= (uint32_t)((latched_phys_addr & 0x0FFFFFFFULL) << 8); // data starts at bit 8
+                top->dev_comp_resp_i[1] |= (uint32_t)((latched_phys_addr >> 24) & 0xFFFFFFFFULL);
+                top->dev_comp_resp_i[2] |= (uint32_t)((latched_phys_addr >> 56) & 0xFFULL);
                 if (top->dev_comp_req_o[0] & 1) mem_resp_pending = false;
-            } else {
-                top->dev_comp_resp_i[2] &= ~(1U << 8); top->dev_comp_resp_i[2] &= ~(1U << 6);
             }
         }
         top->eval();
         tfp->dump(time);
+        if (exp_stage >= 5000 && !req_active && !req_clear_pending) break;
     }
     tfp->close(); delete top;
     std::cout << "\n============================================================" << std::endl;

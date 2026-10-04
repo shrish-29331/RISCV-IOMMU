@@ -5,7 +5,7 @@
 // Setup:
 //   - 5 rotating devices (device_id = 10, 20, 30, 40, 50)
 //   - Same IOVA (0x4000) for all
-//   - 30 total requests
+//   - 10000 total requests
 //   - RANDOM STALLS injected: 5-50 cycles of AXI interconnect congestion per walk
 //
 // Mechanism:
@@ -126,12 +126,14 @@ public:
             uint64_t beat_addr = active_read.base_addr + (active_read.current_beat * 8);
             uint64_t val = read64(beat_addr);
             bool is_last = (active_read.current_beat == active_read.len);
-            top->ds_resp_i[2] |= (1U << 8);
-            if (is_last) top->ds_resp_i[0] |= (1U << 1);
+            
+            top->ds_resp_i[2] |= (1U << 8); // r_valid
+            if (is_last) top->ds_resp_i[0] |= (1U << 1); // r_last
             top->ds_resp_i[0] |= (uint32_t)((val & 0x0FFFFFFFULL) << 4);
             top->ds_resp_i[1] |= (uint32_t)((val >> 28) & 0xFFFFFFFFULL);
             top->ds_resp_i[2] |= (uint32_t)((val >> 60) & 0xF);
             top->ds_resp_i[2] |= ((active_read.id & 0xF) << 4);
+            
             if (is_last) has_active_read = false; else active_read.current_beat++;
         }
     }
@@ -172,7 +174,7 @@ int main(int argc, char** argv) {
     std::cout << "\n============================================================" << std::endl;
     std::cout << "TempoIOMMU-RV: Experiment 3 - Interconnect Memory Contention" << std::endl;
     std::cout << "  Devices: 10, 20, 30, 40, 50 (rotating) | Same IOVA: 0x4000" << std::endl;
-    std::cout << "  Total Requests: 30 | Random AXI stalls: 5-50 cycles injected" << std::endl;
+    std::cout << "  Total Requests: 1000 | Random AXI stalls: 5-50 cycles injected" << std::endl;
     std::cout << "  Expected: DDT walk 14->44 cycles, Cold miss up to 57+ cycles" << std::endl;
     std::cout << "============================================================" << std::endl;
 
@@ -181,7 +183,7 @@ int main(int argc, char** argv) {
     uint64_t req_start_cycle = 0;
     int exp_stage = 0;
 
-    for (uint64_t time = 0; time < 40000; time++) {
+    for (uint64_t time = 0; time < 20000000; time++) {
         top->clk_i = (time % 10 < 5) ? 0 : 1;
         top->eval();
         if (time == 100) { top->rst_ni = 1; std::cout << "[Cycle " << cycle << "] Reset de-asserted." << std::endl; }
@@ -200,14 +202,15 @@ int main(int argc, char** argv) {
                           << " w_ready=" << w_rdy << " b_valid=" << b_vld << std::endl;
             }
 
-            // === EXP3: 5 rotating devices, same IOVA, 30 requests, WITH random stalls ===
-            if (!req_active && !req_clear_pending && cycle > 50 && cycle % 100 == 0 && exp_stage < 30) {
+            // === EXP3: 5 rotating devices, same IOVA, 5000 requests, WITH random stalls ===
+            if (!req_active && !req_clear_pending && cycle > 50 && exp_stage < 5000) {
                 int devices[] = {10, 20, 30, 40, 50};
                 int dev = devices[exp_stage % 5];
                 uint64_t iova = 0x4000ULL;
+                uint8_t req_id = exp_stage % 8;
                 std::cout << "[Cycle " << cycle << "] [REQ " << exp_stage
                           << "] Dev=" << dev << ", IOVA=0x" << std::hex << iova << std::dec << std::endl;
-                set_dev_tr_req_ar(top->dev_tr_req_i, dev, 0, false, iova, 2, exp_stage + 1);
+                set_dev_tr_req_ar(top->dev_tr_req_i, dev, 0, false, iova, req_id, 0);
                 req_active = true; req_start_cycle = cycle; exp_stage++;
             }
             if (req_clear_pending) {
@@ -224,14 +227,25 @@ int main(int argc, char** argv) {
             bool comp_ar_valid = (top->dev_comp_req_o[0] >> 1) & 1;
             static bool mem_resp_pending = false;
             static uint64_t latched_phys_addr = 0;
+
+            top->dev_comp_resp_i[0] = 0;
+            top->dev_comp_resp_i[1] = 0;
+            top->dev_comp_resp_i[2] = 0;
+            
+            top->dev_comp_resp_i[2] |= (1U << 18); // ar_ready (bit 82)
+            top->dev_comp_resp_i[2] |= (1U << 19); // aw_ready (bit 83)
+            top->dev_comp_resp_i[2] |= (1U << 17); // w_ready (bit 81)
+
             if (comp_ar_valid && !mem_resp_pending) { mem_resp_pending = true; latched_phys_addr = 0xbeef0000; }
             if (mem_resp_pending) {
-                top->dev_comp_resp_i[2] |= (1U << 8); top->dev_comp_resp_i[2] |= (1U << 6);
-                top->dev_comp_resp_i[0] = (latched_phys_addr << 4);
-                top->dev_comp_resp_i[1] = (latched_phys_addr >> 28);
+                top->dev_comp_resp_i[2] |= (1U << 8); // r_valid (bit 72)
+                top->dev_comp_resp_i[0] |= (1U << 5); // r_last (bit 5)
+                uint8_t req_id = (exp_stage - 1) % 8;
+                top->dev_comp_resp_i[0] |= ((uint32_t)req_id << 1); // r_id (bits 4:1)
+                top->dev_comp_resp_i[0] |= (uint32_t)((latched_phys_addr & 0x0FFFFFFFULL) << 8); // data starts at bit 8
+                top->dev_comp_resp_i[1] |= (uint32_t)((latched_phys_addr >> 24) & 0xFFFFFFFFULL);
+                top->dev_comp_resp_i[2] |= (uint32_t)((latched_phys_addr >> 56) & 0xFFULL);
                 if (top->dev_comp_req_o[0] & 1) mem_resp_pending = false;
-            } else {
-                top->dev_comp_resp_i[2] &= ~(1U << 8); top->dev_comp_resp_i[2] &= ~(1U << 6);
             }
 
             if (cycle >= 50 && cycle <= 120) {
@@ -248,6 +262,7 @@ int main(int argc, char** argv) {
         }
         top->eval();
         tfp->dump(time);
+        if (exp_stage >= 5000 && !req_active && !req_clear_pending) break;
     }
     tfp->close(); delete top;
     std::cout << "\n============================================================" << std::endl;
